@@ -4,8 +4,11 @@ import * as Docker from 'dockerode'
 import * as req from 'request'
 import { Request, Response } from 'express';
 import { filter } from "lodash"
+import { request } from 'https';
 
 const repo = "maxm007/theia"
+const containerPort = 3000
+const hostPort = 0
 
 const app = express();
 
@@ -21,44 +24,14 @@ app.get('/start/:tag/:userId', async (request, response) => {
     let userId = request.params["userId"]
     let tag = request.params["tag"]
 
+    let containers = await findRunningContainers(tag, userId)
 
-    let containers = await docker.listContainers({
-        "all": true,
-        "filters": {
-            "name": [tag + "-" + userId]
-        }
-    })
     if (containers.length > 1) {
         response.send("ERROR: Found too many containers<br>");
     }
     else if (containers.length == 0) {
-        let images = await docker.listImages()
-        let repoTag = repo + ":" + tag
-        let matches = images.filter(x => x.RepoTags.find(rt => rt == repoTag))
-        if (matches.length == 0) {
-            response.send("ERROR: Couldnt find image for " + repoTag);
-        }
-        else if (matches.length > 1) {
-            response.send("ERROR: Multiple images for " + repoTag);
-        }
-        else {
-            let image = matches[0]
-            let x = await docker.run(
-                image.Id,
-                [],
-                process.stdout,
-                {
-                    name: tag + "-" + userId,
-                    "ExposedPorts": {
-                        
-                    }
-                },
-                function (err, data, container) {
-                    console.log(data.StatusCode);
-                });
+        await startImage(response,request, tag, userId)
 
-        }
-        response.send("")
     }
     else {
         let container = containers[0]
@@ -77,6 +50,79 @@ app.get('/start/:tag/:userId', async (request, response) => {
         // response.write('</pre>')
     }
 });
+
+async function startImage(response: Response, request: Request, tag: string, userId: string): Promise<void> {
+    let images = await docker.listImages()
+    let repoTag = repo + ":" + tag
+    let matches = images.filter(x => x.RepoTags.find(rt => rt == repoTag))
+    if (matches.length == 0) {
+        response.send("ERROR: Couldnt find image for " + repoTag);
+    }
+    else if (matches.length > 1) {
+        response.send("ERROR: Multiple images for " + repoTag);
+    }
+    else {
+        let image = matches[0]
+        let mapContainer = containerPort + "/tcp"
+        let createSettings = {
+            name: tag + "-" + userId,
+            "ExposedPorts": {
+                [mapContainer]: {}
+            },
+            "PortBindings": {
+                [mapContainer]: [{
+                    "HostPort": hostPort.toString()
+                }]
+            },
+        }
+
+
+        let id = await run(image, createSettings)
+        if (id == undefined) {
+            response.send("Error: could nor started container ID")
+        }
+        else {
+            waitOnStartedContainerAndRedirect(id, request, response)
+        }
+    }
+}
+
+async function run(image: Docker.ImageInfo, createSettings: {}): Promise<undefined | string> {
+    return new Promise(resolve => {
+        let event = docker.run(
+            image.Id,
+            [],
+            process.stdout,
+            createSettings
+            , {
+
+            }, x => {
+                console.info("Running container issue" + JSON.stringify(x))
+
+            });
+        event.on("start", x => {
+            console.info("Start " + JSON.stringify(x))
+            resolve(x.id)
+        })
+        event.on("data", x => {
+            console.info("Data " + JSON.stringify(x))
+            resolve(undefined)
+        })
+        event.on("end", x => {
+            console.info("End " + JSON.stringify(x))
+            resolve(undefined)
+        })
+    })
+}
+
+async function findRunningContainers(tag: string, userId) {
+    return await docker.listContainers({
+        "all": true,
+        "filters": {
+            "name": [tag + "-" + userId]
+        }
+    })
+}
 
 async function waitOnStartedContainerAndRedirect(containerId: string, request: Request, response: Response) {
 
